@@ -1,14 +1,17 @@
 #+TITLE: LLVM 教程
 
+*此文尚处于翻译阶段。由于使用 Emacs 的 org-mode 进行翻译作业，而 GitHub 使用的 org-ruby 库目前似乎不能很好地支持 org-mode 的文章内链接，因此目前内部链接处于无法使用状态。文章翻译完成后会修复。*
+
 * 前言与词法分析
 
-- [[chapter1-intro][教程基本介绍]]
-- [[chapter1-lang][Kaleidoscope 语言]]
-- [[chapter1-tokenizer][词法分析器]]
-
-#<<chapter1-intro>>
+- [[#chapter1-intro][教程基本介绍]]
+- [[#chapter1-lang][Kaleidoscope 语言]]
+- [[#chapter1-tokenizer][词法分析器]]
 
 ** 基本介绍
+   :PROPERTIES:
+   :CUSTOM_ID: chapter1-intro
+   :END:
 
    欢迎来到「用 LLVM 实现新语言」的教程，它会告诉你实现一门简单的编程语言是多么的简单有趣。这个教程本身也是在帮助你搭建一个框架，从而实现其他的语言。教程中用到的代码也可作为你尝试 LLVM 其他功能的基础。
 
@@ -44,9 +47,10 @@
 
    附记：我们期待你能够扩展 Kaleidoscope，让它变成属于你自己的语言。好好把玩这些代码吧，编译器不一定就是可怖的怪兽——它和编程语言也可以其乐无穷！
 
-#<<chapter1-lang>>
-
 ** 语言核心
+   :PROPERTIES:
+   :CUSTOM_ID: chapter1-lang
+   :END:
 
    贯穿于全篇教程的是一个叫做「Kaleidoscope」的玩具语言。Kaleidoscope 是门过程式的语言，你可以定义函数，使用条件语句，进行数学计算……整个过程中，我们会逐渐扩展 Kaleidoscope 使其支持 =if/then/else= 语句、=for= 循环、自定义运算符、带有命令行界面的即时编译器等等。
 
@@ -78,9 +82,10 @@ atan2(sin(.4), cos(42))
 
    让我们来好好看看语言的实现！
 
-#<<chapter1-tokenizer>>
-
 ** 词法分析器
+   :PROPERTIES:
+   :CUSTOM_ID: chapter1-tokenizer
+   :END:
 
    实现一门语言，首要任务便是处理文本文件并理解其含义。传统上，我们使用「词法分析器」（或者叫「扫描器」）来把连续的输入划分为记号（token）。每个记号都包含了表示类型的编码和一些数据（比如数值记号的值）。首先，我们来定义类型：
 
