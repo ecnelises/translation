@@ -1,0 +1,7 @@
+* 个人翻译项目
+
+这是自己的一些翻译作品，如果你有兴趣，也可以提交 Pull Request 一起协作。
+
+** LLVM 文档
+   
+   - [[file:llvm/llvm_tutorial.org][LLVM 入门教程]]

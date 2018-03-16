@@ -1,0 +1,183 @@
+#+TITLE: LLVM 教程
+
+* 前言与词法分析
+
+- [[chapter1-intro][教程基本介绍]]
+- [[chapter1-lang][Kaleidoscope 语言]]
+- [[chapter1-tokenizer][词法分析器]]
+
+#<<chapter1-intro>>
+
+** 基本介绍
+
+   欢迎来到「用 LLVM 实现新语言」的教程，它会告诉你实现一门简单的编程语言是多么的简单有趣。这个教程本身也是在帮助你搭建一个框架，从而实现其他的语言。教程中用到的代码也可作为你尝试 LLVM 其他功能的基础。
+
+   此篇教程的目的在于为我们的语言抽丝剥茧，一步步勾勒出它的开发过程。其间，我们会涉猎不少领域，从语言的设计一直到 LLVM 的细部用法。在这个渐进的过程中，我们会详细解释这些代码，不会令你为诸多恼人细节心生懊恼。
+
+   有必要说在前面的是，此文的重点在于编译原理与 LLVM 的知识，而非教授软件开发中的最佳实践。因此我们的实现将会尽量地简化。比如，我们的代码里全局变量随处可见，也没有用到什么设计模式（比如访问者模式）。不过这些代码并不复杂，要是你有心以此为基础来创造你的远大项目，改掉这些毛病并非什么难事。
+
+   我试着组织了一下这篇教程，这样你可以方便地跳过不喜欢或者已经会了的章节。
+
+   教程的大致结构是：
+
+   1) Kaleidoscope 语言的初步展示，还有它的词法分析器——这些东西开篇就清楚地表明了我们的目标与方向。为了让这篇教程更加可改易懂，我们决定弃用生成词法、语法分析器的工具，而选择用 C++ 手写。不过要是你喜欢的话，LLVM 和这些生成器也能一起运作。
+
+   2) 实现语法分析器和抽象语法树——有了词法分析器之后，我们就可以来谈谈语法分析和构造语法树的事情了。本教程用到了递归下降和运算符优先级解析的方法。本章和前一章的内容并非是针对 LLVM 的。实际上，它们与 LLVM 毫无关联。
+
+   3) 生成 LLVM IR——有了语法树，我们就可以开始炫耀一下，生成 LLVM IR 到底有多容易了。
+
+   4) 加入即时编译和优化器——因为有许多人都热衷于把 LLVM 当作一个即时编译工具，所以我们会讲解一下它，然后告诉你如何只用 3 行代码来添加即时编译。在其他方面 LLVM 也同样大有可为，不过这里用一种简单而又「惊艳」的方式展示了它的威力。
+
+   5) 加入控制流语句——既然我们的语言跑得起来了，我们就来试试给它添加一些控制流操作。（比如 =if/then/else= 语句和 =for= 循环）同时我们也有了机会来谈谈所谓的 SSA（静态单赋值形式）。
+
+   6) 加入用户自定义运算符——这一章无甚大用却很有趣。我们扩展语言使得用户可以自定义一元或二元的运算符（还包括了优先级）。有了它，语言里的很多部分都可以用库的方式去实现了。
+
+   7) 加入变量——本章的主题是给语言加上变量和赋值运算符。有趣的地方在于为 LLVM 构造 SSA 是如此地轻松自然：其实，LLVM 根本不要求前端来构造 SSA！
+
+   8) 编译到目标文件——这一章说明了从 LLVM IR 编译到目标文件的过程。
+
+   9) 加入调试信息——我们的小小语言到现在已经具备了控制流、函数、变量了，所以我们希望再往实际的可执行文件里加入调试信息。这样，我们就可以通过调试器在 Kaleidoscope 的函数里设置断点，输出参数，调用函数了！
+
+   10) 总结，还有 LLVM 的其他主题——本章的主线是讨论语言几个可能的扩展方向，同时也给了若干「特殊主题」的阅读指引，比如垃圾回收、异常、调试、对「麻花栈」的支持，以及许多其他内容。
+
+   截至教程尾声，我们的代码除去注释和空行也不到 1000 行。而仅用这点代码，我们就已经为一门正式的语言构建出了一个完全能够胜任工作的编译器，包含了手写的词法分析器、语法解析器、抽象语法树，还有能够生成代码的即时编译器。相对于其他框架 =Hello World= 级别的教程，我相信本文所涉之广足以诠释 LLVM 的强大，也足以成为说服一个编译器爱好者尝试 LLVM 的理由。
+
+   附记：我们期待你能够扩展 Kaleidoscope，让它变成属于你自己的语言。好好把玩这些代码吧，编译器不一定就是可怖的怪兽——它和编程语言也可以其乐无穷！
+
+#<<chapter1-lang>>
+
+** 语言核心
+
+   贯穿于全篇教程的是一个叫做「Kaleidoscope」的玩具语言。Kaleidoscope 是门过程式的语言，你可以定义函数，使用条件语句，进行数学计算……整个过程中，我们会逐渐扩展 Kaleidoscope 使其支持 =if/then/else= 语句、=for= 循环、自定义运算符、带有命令行界面的即时编译器等等。
+
+   出于简化的考虑，Kaleidoscope 里惟一的数据类型就是 64 位的浮点数（亦即 C 语言里的 =double= 类型）。这样的话，所有的数值都是双精度，语言也没必要有类型声明了。语法得到了简化。比如，下面的代码用来计算斐波那契数列：
+
+#+begin_src python
+# Compute the x'th fibonacci number.
+def fib(x)
+  if x < 3 then
+    1
+  else
+    fib(x-1)+fib(x-2)
+
+# This expression will compute the 40th number.
+fib(40)
+#+end_src
+
+   我们也准许 Kaleidoscope 调用标准库函数。（在 LLVM JIT 的帮助下并不困难）这意味着你还可以用 =extern= 关键字来声明函数。（对于互相递归的函数很有用）比如：
+
+#+begin_src cpp
+extern sin(arg);
+extern cos(arg);
+extern atan2(arg1 arg2);
+
+atan2(sin(.4), cos(42))
+#+end_src
+
+   更有意思的例子在第六章：我们用 Kaleidoscope 写了一个能够以不同倍数打印「曼德博」集合的程序。
+
+   让我们来好好看看语言的实现！
+
+#<<chapter1-tokenizer>>
+
+** 词法分析器
+
+   实现一门语言，首要任务便是处理文本文件并理解其含义。传统上，我们使用「词法分析器」（或者叫「扫描器」）来把连续的输入划分为记号（token）。每个记号都包含了表示类型的编码和一些数据（比如数值记号的值）。首先，我们来定义类型：
+
+#+begin_src cpp
+// The lexer returns tokens [0-255] if it is an unknown character, otherwise one
+// of these for known things.
+enum Token {
+  tok_eof = -1,
+
+  // commands
+  tok_def = -2,
+  tok_extern = -3,
+
+  // primary
+  tok_identifier = -4,
+  tok_number = -5,
+};
+
+static std::string IdentifierStr; // Filled in if tok_identifier
+static double NumVal;             // Filled in if tok_number
+#+end_src
+
+   词法分析器返回的每个记号要么是这个枚举里的值，要么是一个 ASCII 码值，表示「不认识的字符」。如果当前的记号表示一个标识符，全局变量 =IdentifierStr= 表示这个标识符的名字。如果当前的记号是一个数值（比如 1.0），它的值就在 =NumVal= 里。注意，我们这里用全局变量是为了简化过程，实际的工程实现里这样做并不合适。
+
+   词法分析器的真正实现是在一个叫 =gettok= 的函数里。每次调用它都会读取标准输入，返回下一个记号。它的定义如下开始：
+
+#+begin_src cpp
+/// gettok - Return the next token from standard input.
+static int gettok() {
+  static int LastChar = ' ';
+
+  // Skip any whitespace.
+  while (isspace(LastChar))
+    LastChar = getchar();
+#+end_src cpp
+
+   =gettok= 通过调用 C 的标准库函数 =getchar()= 来从标准输入读取字符。它识别这些字符，最后把剩下的一个已读入但没操作的字符放在变量 =LastChar= 里。它要做的第一件事就是忽略记号间多余的空白，也就是上面这个循环的内容。
+
+   =gettok= 要做的另一件事就是识别出标识符和关键字，比如 =def=. Kaleidoscope 用一个简单的循环来完成它：
+
+#+begin_src cpp
+if (isalpha(LastChar)) { // identifier: [a-zA-Z][a-zA-Z0-9]*
+  IdentifierStr = LastChar;
+  while (isalnum((LastChar = getchar())))
+    IdentifierStr += LastChar;
+
+  if (IdentifierStr == "def")
+    return tok_def;
+  if (IdentifierStr == "extern")
+    return tok_extern;
+  return tok_identifier;
+}
+#+end_src
+
+   这里，只要词法分析器一得到一个标识符，就把它放在 =IdentifierStr= 这个全局字符串里。既然关键字也是通过这个循环发现的，我们也把处理的代码写在这里。对于数值记号而言，这一切差别不大：
+
+#+begin_src cpp
+if (isdigit(LastChar) || LastChar == '.') {   // Number: [0-9.]+
+  std::string NumStr;
+  do {
+    NumStr += LastChar;
+    LastChar = getchar();
+  } while (isdigit(LastChar) || LastChar == '.');
+
+  NumVal = strtod(NumStr.c_str(), 0);
+  return tok_number;
+}
+#+end_src
+
+   这里的代码简洁明快。读取数值函数的时候，我们用 C 的标准库函数 =strtod= 来把字符串转为数值，并存储到 =NumVal= 当中。需要注意的是，这里没做严谨的错误识别：它会正常地读取「1.23.45.67」然后识别成「1.23」。不必太过在意，要改也可以。然后我们来对付注释：
+
+#+begin_src cpp
+if (LastChar == '#') {
+  // Comment until end of line.
+  do
+    LastChar = getchar();
+  while (LastChar != EOF && LastChar != '\n' && LastChar != '\r');
+
+  if (LastChar != EOF)
+    return gettok();
+}
+#+end_src
+
+   我们遇到注释就直接忽略到行尾，然后返回下一个记号。
+
+   最后，如果输入并不匹配以上的情况，比如非法字符「+」或者文件结束符。我们单独处理：
+
+#+begin_src cpp
+  // Check for end of file.  Don't eat the EOF.
+  if (LastChar == EOF)
+    return tok_eof;
+
+  // Otherwise, just return the character as its ascii value.
+  int ThisChar = LastChar;
+  LastChar = getchar();
+  return ThisChar;
+}
+#+end_src
+
+   有了这些，我们为 Kaleidoscope 语言准备的词法分析器就大功告成了。（完整的词法分析代码在下一章）下面，我们就要开始着手利用词法分析器来进行语法解析、构造语法树了。写好以后，我们会引入一个驱动器来操作词法分析器和语法解析器。
