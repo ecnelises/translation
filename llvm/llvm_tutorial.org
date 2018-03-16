@@ -186,3 +186,319 @@ if (LastChar == '#') {
 #+end_src
 
    有了这些，我们为 Kaleidoscope 语言准备的词法分析器就大功告成了。（完整的词法分析代码在下一章）下面，我们就要开始着手利用词法分析器来进行语法解析、构造语法树了。写好以后，我们会引入一个驱动器来操作词法分析器和语法解析器。
+   
+* 语法分析和抽象语法树
+
+- [[#chapter2-intro][前言]]
+- [[#chapter2-ast][抽象语法树]]
+- [[#chapter2-basic_parsing][语法分析基础]]
+- [[#chapter2-basic_expr_parsing][基本表达式解析]]
+- [[#chapter2-binary_expr_parsing][二元表达式解析]]
+  
+** 前言
+   :PROPERTIES:
+   :CUSTOM_ID: chapter2-intro
+   :END:
+
+   欢迎来到「用 LLVM 实现新语言」的第二章。在本章，我们将讲述如何利用前面写好的词法分析器来为我们的 Kaleidoscope 语言构造一个语法解析器。如果可以解析语法了，我们就可以构造出抽象语法树（AST）了。
+
+   在语法分析的过程中，我们将会用到递归下降和运算符优先级解析两种方法。（后者用于二元表达式，其余的部分则由前者搞定）不过在我们动手之前，先说说语法解析器的结果——抽象语法树。
+
+** 抽象语法树
+   :PROPERTIES:
+   :CUSTOM_ID: chapter2-ast
+   :END:
+   
+   抽象语法树以一种对编译器友好的方式来组织程序，这是为了方便编译器的后续阶段（比如代码生成）进一步处理它。对于解析构造出来的结果，我们准备以单个对象的形式表示。抽象语法树应该精准地刻画我们的程序。而对于 Kaleidoscope，我们有类型来刻画表达式、函数原型和函数。先从表达式开始吧：
+
+#+begin_src cpp
+/// ExprAST - Base class for all expression nodes.
+class ExprAST {
+public:
+  virtual ~ExprAST() {}
+};
+
+/// NumberExprAST - Expression class for numeric literals like "1.0".
+class NumberExprAST : public ExprAST {
+  double Val;
+
+public:
+  NumberExprAST(double Val) : Val(Val) {}
+};
+#+end_src
+
+   以上的代码展示出了共同的基类 =ExprAST= 和一个用来表示数值常量的子类。要指出的是，=NumberExprAST= 这个类把数值常量的值作为自己的数据成员储存了起来，以便编译器后续阶段获知其实际内容。
+
+  我们现在只是弄出了抽象语法树的类，什么访问方法都没有。不过要加上打印代码的虚函数也是易如反掌。下面是 Kaleidoscope 基本语法要用到的其他语法树形式：
+
+#+begin_src cpp
+/// VariableExprAST - Expression class for referencing a variable, like "a".
+class VariableExprAST : public ExprAST {
+  std::string Name;
+
+public:
+  VariableExprAST(const std::string &Name) : Name(Name) {}
+};
+
+/// BinaryExprAST - Expression class for a binary operator.
+class BinaryExprAST : public ExprAST {
+  char Op;
+  std::unique_ptr<ExprAST> LHS, RHS;
+
+public:
+  BinaryExprAST(char op, std::unique_ptr<ExprAST> LHS,
+                std::unique_ptr<ExprAST> RHS)
+    : Op(op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
+};
+
+/// CallExprAST - Expression class for function calls.
+class CallExprAST : public ExprAST {
+  std::string Callee;
+  std::vector<std::unique_ptr<ExprAST>> Args;
+
+public:
+  CallExprAST(const std::string &Callee,
+              std::vector<std::unique_ptr<ExprAST>> Args)
+    : Callee(Callee), Args(std::move(Args)) {}
+};
+#+end_src
+
+   我们的这些语法树节点都设计得简单明了——变量节点保存变量名，二元运算符节点保存运算符编码（比如加号「+」），函数调用节点保存函数名和参数列表。抽象语法树很棒的一点就在于它屏蔽了语法本身的琐碎细节，比如在我们的定义里，一点跟运算符优先级、词法结构有关的东西都没有。
+
+   对于基本的 Kaleidoscope 来说，以上这些节点类型基本就足够了。因为现在我们还没有定义，所以这门语言还不是图灵完备的。不过很快，在后面的章节我们就会去搞定它。下面我们要说的是函数的接口，以及函数本身的节点定义。
+
+#+begin_src cpp
+/// PrototypeAST - This class represents the "prototype" for a function,
+/// which captures its name, and its argument names (thus implicitly the number
+/// of arguments the function takes).
+class PrototypeAST {
+  std::string Name;
+  std::vector<std::string> Args;
+
+public:
+  PrototypeAST(const std::string &name, std::vector<std::string> Args)
+    : Name(name), Args(std::move(Args)) {}
+};
+
+/// FunctionAST - This class represents a function definition itself.
+class FunctionAST {
+  std::unique_ptr<PrototypeAST> Proto;
+  std::unique_ptr<ExprAST> Body;
+
+public:
+  FunctionAST(std::unique_ptr<PrototypeAST> Proto,
+              std::unique_ptr<ExprAST> Body)
+    : Proto(std::move(Proto)), Body(std::move(Body)) {}
+};
+#+end_src
+
+   在 Kaleidoscope 中，函数的类型仅仅由它参数的个数决定，因为所有的值都是 =double= 类型，没必要用额外的空间存储类型信息了。而在实际应用中，像 =ExprAST= 这样的类是应该有一个字段来表示类型的。
+
+   脚手架业已成型，现在可以正式开始解析表达式和函数体。
+
+** 语法分析基础
+   :PROPERTIES:
+   :CUSTOM_ID: chapter2-basic_parsing
+   :END:
+   
+   定义好抽象语法树之后，是时候写语法分析器来构建它了。这里以解析表达式「x+y」（在词法分析器眼中，这是三个记号）为例，它生成的语法树应该和下面的代码效果等同：
+
+#+begin_src cpp
+auto LHS = llvm::make_unique<VariableExprAST>("x");
+auto RHS = llvm::make_unique<VariableExprAST>("y");
+auto Result = std::make_unique<BinaryExprAST>('+', std::move(LHS),
+                                              std::move(RHS));
+#+end_src
+
+   要做到这点，我们先得定义一个辅助方法：
+
+#+begin_src cpp
+/// CurTok/getNextToken - Provide a simple token buffer.  CurTok is the current
+/// token the parser is looking at.  getNextToken reads another token from the
+/// lexer and updates CurTok with its results.
+static int CurTok;
+static int getNextToken() {
+  return CurTok = gettok();
+}
+#+end_src
+
+   这样相当于创建一个词法记号的缓冲区，我们就可以「向前多看」一个记号了。我们的语法解析器会假定 CurTok 就是当前等待被分析的记号。
+
+#+begin_src cpp
+/// LogError* - These are little helper functions for error handling.
+std::unique_ptr<ExprAST> LogError(const char *Str) {
+  fprintf(stderr, "LogError: %s\n", Str);
+  return nullptr;
+}
+std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
+  LogError(Str);
+  return nullptr;
+}
+#+end_src
+
+   =LogError= 函数是用来帮助我们处理错误的。这里语法解析器的错误处理远非尽善尽美，也不善解人意，但对教程而言足矣。这个方法让我们在面对返回值各异的解析函数时游刃有余——它只返回 =null=.
+
+   辅助方法写好了，现在开始实现语法分析的第一部分——数值常量。
+
+** 基本表达式解析
+   :PROPERTIES:
+   :CUSTOM_ID: chapter2-basic_expr_parsing
+   :END:
+
+   我们从数值常量的部分开始，因为解析它们最简单。对语法树中定义的每种节点，我们都实现一个函数来解析这个类型的节点。对数值常量，我们有：
+
+#+begin_src cpp
+/// numberexpr ::= number
+static std::unique_ptr<ExprAST> ParseNumberExpr() {
+  auto Result = llvm::make_unique<NumberExprAST>(NumVal);
+  getNextToken(); // consume the number
+  return std::move(Result);
+}
+#+end_src
+
+   非常简单的函数。当前记号是 =tok_number= 的时候程序就会调用这个函数，获得这个记号对应的数值，然后根据它创建出一个 =NumberExprAST= 对象，最后把记号流向前移动，然后返回。
+
+   这个函数还是有些值得一提的地方。首先，它会「消耗」所有符合我们语法产生式的记号以生成抽象语法树的节点，然后把记号流向前推进到第一个不符合语法规则的地方。对递归下降解析器而言，这几乎是个固定套路。以下解析括号表达式的代码能更清楚地说明这一点：
+
+#+begin_src cpp
+/// parenexpr ::= '(' expression ')'
+static std::unique_ptr<ExprAST> ParseParenExpr() {
+  getNextToken(); // eat (.
+  auto V = ParseExpression();
+  if (!V)
+    return nullptr;
+
+  if (CurTok != ')')
+    return LogError("expected ')'");
+  getNextToken(); // eat ).
+  return V;
+}
+#+end_src
+
+   这个函数展现出了解析过程的若干要点：
+
+   1) 这里用到了 =LogError= 函数。在调用过程中，解析函数会假定当前记号是一个左括号。但是在解析出中间的表达式后，有可能后面没有对应的右括号。比如，如果用户输入了「(4 x」而不是「(4)」，解析器就会报错。所以我们的代码需要一种方式来表明出错了。在这里，我们以返回 =null= 作为错误标记。
+
+   2) 另一个有趣的地方就是，这个函数是会递归调用 =ParseExpression= 的。（一会我们就会看见 =ParseExpression= 也会调用 =ParseParenExpr= ）这样的递归使得解析器功能强大，因为我们可以不失简洁地处理递归语法了。注意，括号表达式本身是没有对应的抽象语法树节点的。括号的意义在于它可以表现语法中的分组，指引解析器以特定顺序解析语法。而一旦抽象语法树建立好了，括号也就用不着了。
+
+   以下的代码用来分析变量和函数调用：
+
+#+begin_src cpp
+/// identifierexpr
+///   ::= identifier
+///   ::= identifier '(' expression* ')'
+static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
+  std::string IdName = IdentifierStr;
+
+  getNextToken();  // eat identifier.
+
+  if (CurTok != '(') // Simple variable ref.
+    return llvm::make_unique<VariableExprAST>(IdName);
+
+  // Call.
+  getNextToken();  // eat (
+  std::vector<std::unique_ptr<ExprAST>> Args;
+  if (CurTok != ')') {
+    while (1) {
+      if (auto Arg = ParseExpression())
+        Args.push_back(std::move(Arg));
+      else
+        return nullptr;
+
+      if (CurTok == ')')
+        break;
+
+      if (CurTok != ',')
+        return LogError("Expected ')' or ',' in argument list");
+      getNextToken();
+    }
+  }
+
+  // Eat the ')'.
+  getNextToken();
+
+  return llvm::make_unique<CallExprAST>(IdName, std::move(Args));
+}
+#+end_src
+
+   此函数同前面部分并无多大区别，当前记号为 =tok_identifier= 的时候就会调用它。同样地，它也用到了递归解析和错误处理。不过，这里用到了「向前看」的方法来判断这个标识符到底是一个变量还是函数调用：它检查一下后一个记号是不是做括号，并见机行事构建出 =VariableExprAST= 或 =CallExprAST= 对象。
+
+   既然我们表达式解析的函数皆已就绪，我们即可开始把它们封装到一起。我们称这类表达式为「基本表达式」。到后面就明白为什么会这样称呼了。为了解析一个基本表达式，我们首先需判断它究竟是何种类型：
+
+#+begin_src cpp
+/// primary
+///   ::= identifierexpr
+///   ::= numberexpr
+///   ::= parenexpr
+static std::unique_ptr<ExprAST> ParsePrimary() {
+  switch (CurTok) {
+  default:
+    return LogError("unknown token when expecting an expression");
+  case tok_identifier:
+    return ParseIdentifierExpr();
+  case tok_number:
+    return ParseNumberExpr();
+  case '(':
+    return ParseParenExpr();
+  }
+}
+#+end_src
+
+   看见这个函数后，大概你心里就明白为何之前如此强调「当前记号」的类型了。这里用向前看的方法判断要解析表达式的类型，并分别以对应的函数来解析它。
+
+   基本表达式已搞定，接下来看看二元表达式。相比而言，它们会棘手些。
+
+** 二元表达式解析
+   :PROPERTIES:
+   :CUSTOM_ID: chapter2-binary_expr_parsing
+   :END:
+
+   二义性让解析二元表达式变得困难。例如，对于给定的字符串「x+yz」，解析器可以理解成「(x+y)z」或者「x+(yz)」。由数学常识可知，后者才是对的，因为乘法的优先级比加法的高。
+
+   解决方法也有很多。而这里的[[https://en.wikipedia.org/wiki/Operator-precedence_parser][运算符优先级解析]]属于兼备高效与优雅的一种。它利用了二元运算符的优先级来构造递归。在开始前，我们需要一个优先级表：
+
+#+begin_src cpp
+/// BinopPrecedence - This holds the precedence for each binary operator that is
+/// defined.
+static std::map<char, int> BinopPrecedence;
+
+/// GetTokPrecedence - Get the precedence of the pending binary operator token.
+static int GetTokPrecedence() {
+  if (!isascii(CurTok))
+    return -1;
+
+  // Make sure it's a declared binop.
+  int TokPrec = BinopPrecedence[CurTok];
+  if (TokPrec <= 0) return -1;
+  return TokPrec;
+}
+
+int main() {
+  // Install standard binary operators.
+  // 1 is lowest precedence.
+  BinopPrecedence['<'] = 10;
+  BinopPrecedence['+'] = 20;
+  BinopPrecedence['-'] = 20;
+  BinopPrecedence['*'] = 40;  // highest.
+  ...
+}
+#+end_src
+
+   最基本的 Kaleidoscope 语言仅支持四个二元运算符。（不过我们机智勇敢的读者们大可以扩展一番） =GetTokPrecedence= 函数返回当前记号的优先级，当不是二元运算符的时候返回 -1。这里用一个 =map=  可以方便扩展，也可以避免在代码里出现具体的符号。不过，在这里，不用 =map= 而直接在 =GetTokPrecedence= 函数里比较（或者用定长数组）也没多大问题。
+
+   有了上面的辅助函数以后，我们就可以正式开始了。算符优先解析的基本思想就是把通过有语法二义性的运算符来把表达式分而治之。考虑例子表达式「a+b+(c+d)ef+g」。算符优先解析的过程会将其看作被二元运算符所隔开的一系列基本表达式。这样的话，首先解析到的就是基本表达式「a」，然后依次发现 [+, b]、[+, (c+d)]、[*, e]、[*, f] 和 [+, g]。注意括号也是基本表达式，所以不用担心解析器搞不定「(c+d)」这种子表达式。 
+
+   接下来，先定义表达式为一个后跟若干个 [二元运算符, 基本表达式] 的基本表达式：
+
+#+begin_src cpp
+/// expression
+///   ::= primary binoprhs
+///
+static std::unique_ptr<ExprAST> ParseExpression() {
+  auto LHS = ParsePrimary();
+  if (!LHS)
+    return nullptr;
+
+  return ParseBinOpRHS(0, std::move(LHS));
+}
+#+end_src
